@@ -149,8 +149,9 @@ def get_model_cache_path(model_name, revision):
     from pathlib import Path
 
     # 构建本地缓存路径（与Rust端保持一致）
-    home = Path.home()
-    cache_base = home / ".cache" / "modelscope" / "hub" / "models" / "iic"
+    from modelscope.utils.file_utils import get_modelscope_cache_dir
+
+    cache_base = Path(get_modelscope_cache_dir()) / "models" / "iic"
 
     # 从完整模型名提取简短名称 (iic/xxx -> xxx)
     short_name = model_name.split('/')[-1] if '/' in model_name else model_name

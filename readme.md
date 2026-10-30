@@ -1,17 +1,29 @@
 > **这是 [233stone/vocotype-cli](https://github.com/233stone/vocotype-cli) 的非官方改进版，侧重 Windows 日常使用。** 与 VocoType 官方无关；原项目的说明保留在下面。
 >
 > ### 本仓库的改动
-> - **按住说话**：按住 F2 开始录音，松开自动结束并输入文字（原版是按一下开始、再按一下结束）。F2 会被拦下，不再传给当前程序。在配置里把 `hotkeys.mode` 设为 `"toggle"` 可改回原来的方式。
-> - **录音提示**：开始和结束各响一声；屏幕底部中间显示浮条「● 正在录音」「识别中…」。浮条不抢焦点、鼠标可穿透。`indicator.sound` 设为 `false` 可关掉提示音。
-> - **边说边预览**：录音时约每 0.6 秒把已录的部分识别一遍，文字实时显示在浮条里；松开后输入带标点的最终结果。可调 `preview.enabled` / `preview.interval_s` / `preview.tail_s`。仅本地 FunASR 后端。
+> - **按住说话**：按住 F2 开始录音，松开自动结束并输入文字（原版是按一下开始、再按一下结束）。F2 会被拦下，不再传给当前程序。`hotkeys.mode` 设为 `"toggle"` 可改回原来的方式。
+> - **录音提示**：开始和结束各响一声；屏幕底部中间显示浮条「启动中」「● 正在录音」「识别中…」。浮条不抢焦点、鼠标可穿透。`indicator.sound` 设为 `false` 可关掉提示音。
+> - **边说边预览**：录音时定时把已录的部分识别一遍，文字实时显示在浮条里；松开后输入最终结果。可调 `preview.enabled` / `preview.interval_s` / `preview.tail_s`。
+> - **Qwen3-ASR 显卡识别**：`backend` 设为 `"qwen3"` 时用 [Qwen3-ASR](https://github.com/QwenLM/Qwen3-ASR)（默认 1.7B，约 4GB 显存），比原来的 Paraformer 准，中英混说也行；加载失败自动退回 FunASR。
+> - **纠错记忆 + 热词**：识别错了按 F3，弹出刚才那句，改对后按 Enter（Ctrl+Enter 只记住不替换）。程序记下「错 → 对」以后自动替换，正确写法同时作为热词交给 Qwen3-ASR，让它往这些词上靠。词库在 `user_vocab.json`，也可以直接手改。
+> - **去口头禅**：自动去掉「嗯、呃」和句首的「啊、哦」。另有可选的本地小模型润色（`polish.enabled`），8GB 显存放不下两个模型，默认关。
+> - **更稳的热键**：开始/结束录音不在键盘钩子里做（处理慢了 Windows 会悄悄摘掉钩子）；另有看门狗，钩子失效时自动重启。
+> - **模型放项目里**：模型缓存在项目的 `models/` 文件夹，不占 C 盘（可用 `MODELSCOPE_CACHE` 改位置）。
 > - **Windows 启动脚本**：`start-vocotype.ps1` 隐藏窗口在后台启动，不会重复启动，`-Stop` 停止；`install-shortcuts.ps1` 创建桌面快捷方式和开机自动启动。
 >
-> 改动的文件：`main.py`、`app/transcribe.py`、新增 `app/indicator.py`、`start-vocotype.ps1`、`install-shortcuts.ps1`。按 Apache License 2.0 发布，与原项目相同。
+> 新增 `app/indicator.py`、`app/vocab.py`、`app/qwen_backend.py`、`app/cleanup.py`、`config.example.json`、两个 `.ps1`；修改 `main.py`、`app/transcribe.py`、`app/download_models.py`。按 Apache License 2.0 发布，与原项目相同。
 >
 > ### Windows 快速上手
 > 1. 按下文「CLI 版安装指南」建好 `.venv`、装好依赖、下载模型。
-> 2. 运行 `powershell -ExecutionPolicy Bypass -File install-shortcuts.ps1`。
-> 3. 双击桌面「VocoType 语音输入」，约 30 秒后按住 F2 说话。
+> 2. 用显卡识别（推荐，需要 NVIDIA 显卡）：
+>    ```
+>    uv pip install --python .venv/Scripts/python.exe torch --index-url https://download.pytorch.org/whl/cu126
+>    uv pip install --python .venv/Scripts/python.exe qwen-asr
+>    ```
+>    不要加 `-U`，否则会把显卡版 torch 换成普通版。第一次启动会自动下载 Qwen3-ASR 模型（约 4.4GB）。
+> 3. 把 `config.example.json` 复制成 `config.json`（没显卡就把 `backend` 改成 `"funasr"`）。
+> 4. 运行 `powershell -ExecutionPolicy Bypass -File install-shortcuts.ps1`。
+> 5. 双击桌面「VocoType 语音输入」，浮条显示「可以用了」后按住 F2 说话，识别错了按 F3。
 
 ---
 

@@ -17,6 +17,8 @@ import numpy as np
 
 from .audio_capture import AudioCapture
 from .config import ensure_logging_dir, load_config
+from .vocab import Vocab
+from .cleanup import strip_fillers
 
 
 logger = logging.getLogger(__name__)
@@ -42,6 +44,7 @@ class TranscriptionWorker:
     ) -> None:
         self.config = load_config(config_path)
         self.on_result = on_result
+        self.vocab = Vocab()  # 个人词库：纠错替换 + 热词
         # 边录边识别的预览：录音时隔一会儿把已录的部分识别一遍，回调 on_preview(text)
         self.on_preview: Optional[Callable[[str], None]] = None
         self._asr_lock = threading.Lock()  # 预览和最终识别不能同时用模型
@@ -59,9 +62,32 @@ class TranscriptionWorker:
         )
 
         backend = self.config.get("backend", "funasr").lower()
+        self._qwen = None
+        if backend == "qwen3":
+            try:
+                from app.qwen_backend import QwenASR
+                self._qwen = QwenASR(self.config.get("qwen3"), sample_rate=audio_cfg["sample_rate"])
+                logger.info("使用 Qwen3-ASR 本地显卡识别后端")
+            except Exception as exc:  # noqa: BLE001
+                logger.error("Qwen3-ASR 加载失败，改用 FunASR：%s", exc, exc_info=True)
+                backend = "funasr"
         self._backend = backend
 
-        if backend == "volcengine":
+        # 整理：去口头禅（规则）+ 可选的本地小模型润色
+        self._fillers = self.config.get("cleanup", {}).get("fillers", True)
+        self._polisher = None
+        polish_cfg = self.config.get("polish", {})
+        if polish_cfg.get("enabled"):
+            try:
+                from app.cleanup import Polisher
+                self._polisher = Polisher(polish_cfg)
+            except Exception as exc:  # noqa: BLE001
+                logger.error("润色模型加载失败，不润色：%s", exc, exc_info=True)
+
+        if backend == "qwen3":
+            self._volcengine_client = None
+            self.fun_server = None
+        elif backend == "volcengine":
             from app.volcengine_asr import VolcengineASRClient
             self._volcengine_client = VolcengineASRClient(
                 self.config.get("volcengine", {})
@@ -133,6 +159,10 @@ class TranscriptionWorker:
                 self.audio.stop()
 
             # 清理 ASR 后端资源
+            if self._qwen is not None:
+                self._qwen.cleanup()
+            if self._polisher is not None:
+                self._polisher.cleanup()
             if self.fun_server is not None:
                 self.fun_server.cleanup()
             elif self._volcengine_client is not None:
@@ -248,7 +278,7 @@ class TranscriptionWorker:
             self._capture_thread = threading.Thread(target=self._capture_loop, daemon=True)
             self._capture_thread.start()
             self._current_session_id = session_id
-            if self.on_preview and self.fun_server is not None:
+            if self.on_preview and (self.fun_server is not None or self._qwen is not None):
                 self._preview_thread = threading.Thread(
                     target=self._preview_loop, args=(session_id,), daemon=True, name="Preview"
                 )
@@ -381,28 +411,44 @@ class TranscriptionWorker:
             if not self._asr_lock.acquire(blocking=False):
                 continue  # 上一条的最终识别还在跑，让它先
             try:
-                path = self._temp_wav(samples)
-                try:
-                    options = dict(self.config.get("asr") or {})
-                    options["use_punc"] = False
-                    options["use_vad"] = False
-                    res = self.fun_server.transcribe_audio(path, options=options)
-                finally:
+                if self._qwen is not None:
+                    res = self._qwen.transcribe(samples, context=self.vocab.context())
+                else:
+                    path = self._temp_wav(samples)
                     try:
-                        os.remove(path)
-                    except OSError:
-                        pass
+                        options = dict(self.config.get("asr") or {})
+                        options["use_punc"] = False
+                        options["use_vad"] = False
+                        res = self.fun_server.transcribe_audio(path, options=options)
+                    finally:
+                        try:
+                            os.remove(path)
+                        except OSError:
+                            pass
             except Exception as exc:  # noqa: BLE001
                 logger.debug("预览识别出错: %s", exc)
                 continue
             finally:
                 self._asr_lock.release()
             text = (res or {}).get("text", "") if (res or {}).get("success") else ""
+            text = self._tidy(text) if text else text
             if text and self._recording.is_set() and self._current_session_id == session_id and self.on_preview:
                 try:
                     self.on_preview(text)
                 except Exception as exc:  # noqa: BLE001
                     logger.debug("预览回调出错: %s", exc)
+
+    def _tidy(self, text: str, final: bool = False) -> str:
+        """词库替换 → 去口头禅 → （最终结果才）润色 → 再替换一次（润色可能改坏专有名词）。"""
+        text = self.vocab.apply(text)
+        if self._fillers:
+            text = strip_fillers(text)
+        if final and self._polisher is not None and text:
+            try:
+                text = self.vocab.apply(self._polisher.polish(text, self.vocab.context()))
+            except Exception as exc:  # noqa: BLE001
+                logger.error("润色失败，用原句: %s", exc)
+        return text
 
     def _temp_wav(self, samples: np.ndarray) -> str:
         import wave
@@ -466,7 +512,13 @@ class TranscriptionWorker:
         self.last_segment_path = recent_path
 
     def _transcribe_once(self, samples: np.ndarray) -> None:
-        if self._backend == "volcengine":
+        if self._backend == "qwen3":
+            self._write_recent_wav(samples)
+            start = time.time()
+            with self._asr_lock:
+                asr_result = self._qwen.transcribe(samples, context=self.vocab.context())
+            self._dispatch_result(asr_result, time.time() - start)
+        elif self._backend == "volcengine":
             self._transcribe_once_volcengine(samples)
         else:
             self._transcribe_once_funasr(samples)
@@ -526,7 +578,7 @@ class TranscriptionWorker:
             )
         else:
             result = TranscriptionResult(
-                text=asr_result.get("text", ""),
+                text=self._tidy(asr_result.get("text", ""), final=True),
                 raw_text=asr_result.get("raw_text", ""),
                 duration=asr_result.get("duration", 0.0),
                 inference_latency=inference_latency,

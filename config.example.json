@@ -1,0 +1,29 @@
+{
+  "backend": "qwen3",
+  "qwen3": {
+    "model": "Qwen/Qwen3-ASR-1.7B",
+    "device": "cuda:0",
+    "language": null
+  },
+  "hotkeys": {
+    "toggle": "f2",
+    "mode": "hold",
+    "correct": "f3"
+  },
+  "preview": {
+    "enabled": true,
+    "interval_s": 1.0,
+    "tail_s": 20
+  },
+  "indicator": {
+    "sound": true
+  },
+  "cleanup": {
+    "fillers": true
+  },
+  "polish": {
+    "enabled": false,
+    "model": "Qwen/Qwen3-1.7B",
+    "device": "cuda:0"
+  }
+}
