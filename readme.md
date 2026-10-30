@@ -1,3 +1,20 @@
+> **这是 [233stone/vocotype-cli](https://github.com/233stone/vocotype-cli) 的非官方改进版，侧重 Windows 日常使用。** 与 VocoType 官方无关；原项目的说明保留在下面。
+>
+> ### 本仓库的改动
+> - **按住说话**：按住 F2 开始录音，松开自动结束并输入文字（原版是按一下开始、再按一下结束）。F2 会被拦下，不再传给当前程序。在配置里把 `hotkeys.mode` 设为 `"toggle"` 可改回原来的方式。
+> - **录音提示**：开始和结束各响一声；屏幕底部中间显示浮条「● 正在录音」「识别中…」。浮条不抢焦点、鼠标可穿透。`indicator.sound` 设为 `false` 可关掉提示音。
+> - **边说边预览**：录音时约每 0.6 秒把已录的部分识别一遍，文字实时显示在浮条里；松开后输入带标点的最终结果。可调 `preview.enabled` / `preview.interval_s` / `preview.tail_s`。仅本地 FunASR 后端。
+> - **Windows 启动脚本**：`start-vocotype.ps1` 隐藏窗口在后台启动，不会重复启动，`-Stop` 停止；`install-shortcuts.ps1` 创建桌面快捷方式和开机自动启动。
+>
+> 改动的文件：`main.py`、`app/transcribe.py`、新增 `app/indicator.py`、`start-vocotype.ps1`、`install-shortcuts.ps1`。按 Apache License 2.0 发布，与原项目相同。
+>
+> ### Windows 快速上手
+> 1. 按下文「CLI 版安装指南」建好 `.venv`、装好依赖、下载模型。
+> 2. 运行 `powershell -ExecutionPolicy Bypass -File install-shortcuts.ps1`。
+> 3. 双击桌面「VocoType 语音输入」，约 30 秒后按住 F2 说话。
+
+---
+
 # VocoType - 精准的离线语音输入法
 
 <h2 align="center">您的声音，绝不离开电脑</h2>

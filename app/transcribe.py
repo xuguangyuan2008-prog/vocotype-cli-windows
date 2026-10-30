@@ -42,6 +42,10 @@ class TranscriptionWorker:
     ) -> None:
         self.config = load_config(config_path)
         self.on_result = on_result
+        # 边录边识别的预览：录音时隔一会儿把已录的部分识别一遍，回调 on_preview(text)
+        self.on_preview: Optional[Callable[[str], None]] = None
+        self._asr_lock = threading.Lock()  # 预览和最终识别不能同时用模型
+        self._preview_thread: Optional[threading.Thread] = None
         self.log_dir = ensure_logging_dir(self.config)
         self.last_segment_path: Optional[Path] = None
         self._session_id_counter = itertools.count(1)
@@ -244,6 +248,11 @@ class TranscriptionWorker:
             self._capture_thread = threading.Thread(target=self._capture_loop, daemon=True)
             self._capture_thread.start()
             self._current_session_id = session_id
+            if self.on_preview and self.fun_server is not None:
+                self._preview_thread = threading.Thread(
+                    target=self._preview_loop, args=(session_id,), daemon=True, name="Preview"
+                )
+                self._preview_thread.start()
 
     def stop(self, _from_capture_thread: bool = False) -> None:
         """停止录音并提交转录任务
@@ -348,6 +357,65 @@ class TranscriptionWorker:
             frame_count = len(self._buffer)
         logger.debug("capture loop exiting, collected %s frames", frame_count)
 
+    def _preview_loop(self, session_id: int) -> None:
+        """录音期间每隔 interval 秒识别一次已录的音频（不加标点，快一些）。
+        录得很长时只识别最后 tail_s 秒，免得越录越慢。"""
+        cfg = self.config.get("preview", {})
+        interval = float(cfg.get("interval_s", 0.6))
+        tail_s = float(cfg.get("tail_s", 20))
+        rate = self._audio_cfg["sample_rate"]
+        last_n = 0
+        while self._recording.is_set() and self._current_session_id == session_id:
+            time.sleep(interval)
+            if not self._recording.is_set() or self._current_session_id != session_id:
+                break
+            with self._buffer_lock:
+                if not self._buffer:
+                    continue
+                samples = np.concatenate(self._buffer, axis=0)
+            if samples.size - last_n < rate * 0.3 or samples.size < rate * 0.5:
+                continue  # 新录的太少，不值得再识别
+            last_n = samples.size
+            if samples.size > rate * tail_s:
+                samples = samples[-int(rate * tail_s):]
+            if not self._asr_lock.acquire(blocking=False):
+                continue  # 上一条的最终识别还在跑，让它先
+            try:
+                path = self._temp_wav(samples)
+                try:
+                    options = dict(self.config.get("asr") or {})
+                    options["use_punc"] = False
+                    options["use_vad"] = False
+                    res = self.fun_server.transcribe_audio(path, options=options)
+                finally:
+                    try:
+                        os.remove(path)
+                    except OSError:
+                        pass
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("预览识别出错: %s", exc)
+                continue
+            finally:
+                self._asr_lock.release()
+            text = (res or {}).get("text", "") if (res or {}).get("success") else ""
+            if text and self._recording.is_set() and self._current_session_id == session_id and self.on_preview:
+                try:
+                    self.on_preview(text)
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("预览回调出错: %s", exc)
+
+    def _temp_wav(self, samples: np.ndarray) -> str:
+        import wave
+
+        fd, path = tempfile.mkstemp(prefix="asr_preview_", suffix=".wav")
+        os.close(fd)
+        with wave.open(path, "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(self._audio_cfg["sample_rate"])
+            wf.writeframes(samples.tobytes())
+        return path
+
     def _combine_buffer(self) -> Optional[np.ndarray]:
         with self._buffer_lock:
             if not self._buffer:
@@ -408,10 +476,11 @@ class TranscriptionWorker:
         tmp_path = self._write_temp_wav(samples)
         start = time.time()
         try:
-            asr_result = self.fun_server.transcribe_audio(
-                tmp_path,
-                options=self.config.get("asr"),
-            )
+            with self._asr_lock:
+                asr_result = self.fun_server.transcribe_audio(
+                    tmp_path,
+                    options=self.config.get("asr"),
+                )
         finally:
             inference_latency = time.time() - start
             try:
